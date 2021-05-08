@@ -1038,7 +1038,7 @@ def Deploy_Binaries_For_Bundle(config, parameters):
         # [8] Deploy Qt Frameworks
         #-------------------------------------------------------------
         verbose = " -verbose=%d" % DeployVerbose
-        app_bundle = "klayout.app"
+        app_bundle = "klayout.app"  # do not change this
         options = macdepQtOpt + verbose
         deploytool = parameters['deploy_tool']
 
@@ -1089,26 +1089,16 @@ def Deploy_Binaries_For_Bundle(config, parameters):
             print( " [9] Optional deployment of Python from %s ..." % HBPythonFrameworkPath )
             print( "  [9.1] Copying Python Framework" )
 
-            cmd01 = "rm -rf %s" % pythonFrameworkPath
-            cmd02 = "rsync -a --safe-links %s/ %s" % (HBPythonFrameworkPath, pythonFrameworkPath)
-
-            cmd03 = "rm -rf %s" % testTarget
-            cmd04 = "rm -rf %s" % resourceTarget1
-            cmd05 = "unlink %s" % resourceTarget2
-            cmd06 = "rm -rf %s" % binTarget
-
-            cmd07 = "mkdir %s" % sitepackagesTarget
-            cmd08 = "cp -RL %s/{pip*,pkg_resources,setuptools*,wheel*} %s" % (sitepackagesSource, sitepackagesTarget)
-
-            shell_commands = list()
-            shell_commands.append(cmd01)
-            shell_commands.append(cmd02)
-            shell_commands.append(cmd03)
-            shell_commands.append(cmd04)
-            shell_commands.append(cmd05)
-            shell_commands.append(cmd06)
-            shell_commands.append(cmd07)
-            shell_commands.append(cmd08)
+            shell_commands = [
+                "rm -rf %s" % pythonFrameworkPath,
+                "rsync -a --safe-links %s/ %s" % (HBPythonFrameworkPath, pythonFrameworkPath),
+                "rm -rf %s" % testTarget,
+                # "rm -rf %s" % resourceTarget1,
+                "unlink %s" % resourceTarget2,
+                "rm -rf %s" % binTarget,
+                "mkdir %s" % sitepackagesTarget,
+                "cp -RL %s/{pip*,pkg_resources,setuptools*,wheel*} %s" % (sitepackagesSource, sitepackagesTarget)
+            ]
 
             for command in shell_commands:
                 if subprocess.call( command, shell=True ) != 0:
@@ -1124,8 +1114,14 @@ def Deploy_Binaries_For_Bundle(config, parameters):
             print("  [9.2] Relinking dylib dependencies inside Python.framework" )
             print("   [9.2.1] Patching Python Framework" )
             depdict = WalkFrameworkPaths( pythonFrameworkPath )
-            appPythonFrameworkPath = '@executable_path/../Frameworks/Python.framework/'
+            appPythonFrameworkPath = '@executable_path/../Frameworks/Python.framework'
             PerformChanges(depdict, [(HBPythonFrameworkPath, appPythonFrameworkPath, False)], bundleExecPathAbs)
+
+            # Create a python executable in MacOS/python
+            shutil.copy2(resourceTarget1 + '/Python.app/Contents/MacOS/Python', bundleExecPathAbs + '/python')
+            klayoutPath = bundleExecPathAbs
+            depdict = WalkFrameworkPaths(klayoutPath, filter_regex=r'python$', search_path_filter=r'\t+/usr/local/Cellar')
+            PerformChanges(depdict, [(os.path.realpath(HBPythonFrameworkPath), appPythonFrameworkPath, False)], bundleExecPathAbs)
 
             print("   [9.2.2] Patching /usr/local/opt/ libs")
             usrLocalPath = '/usr/local/opt/'
@@ -1164,13 +1160,19 @@ def Deploy_Binaries_For_Bundle(config, parameters):
             with open(site_module, 'w') as site:
                 import re
                 for line in buf:
-                    # This will fool pip into thinking it's inside a virtual environment
-                    # and install new packages to the correct site-packages
                     if re.match("^PREFIXES", line) is not None:
-                        line = line + "sys.real_prefix = sys.prefix\n"
+                        # This will fool pip into thinking it's inside a virtual environment
+                        # and install new packages to the correct site-packages
+                        # (probably deprecated, but no harm)
+                        line += "sys.real_prefix = sys.prefix\n"
                     # do not allow installation in the user folder.
                     if re.match("^ENABLE_USER_SITE", line) is not None:
                         line = "ENABLE_USER_SITE = False\n"
+                        # Ordinarily, sys.executable points to klayout.app/Contents/MacOS/klayout
+                        # We want it to point to the newly shipped klayout.app/Contents/MacOS/python
+                        # This way, we can launch subprocesses with subprocess.check_call([sys.executable, ...])
+                        line += "sys._base_executable = os.path.join(os.path.split(sys.executable)[0], 'python')\n"
+                        line += "sys.executable = sys._base_executable\n"
                     site.write(line)
 
             #----------------------------------------------------------------------------------
@@ -1189,17 +1191,21 @@ def Deploy_Binaries_For_Bundle(config, parameters):
             # >>> pip.main( ['install', 'pandas'] )
             # >>> pip.main( ['install', 'matplotlib'] )
             #----------------------------------------------------------------------------------
-            pip_module = "%s/Versions/%s/lib/python%s/site-packages/pip/__init__.py" % \
-                                     (pythonFrameworkPath, pythonHBVer, pythonHBVer)
-            with open(pip_module, 'r') as pip:
-                buf = pip.readlines()
-            with open(pip_module, 'w') as pip:
-                import re
-                for line in buf:
-                    # this will reject user's configuration of pip, forcing the isolated mode
-                    line = re.sub("return isolated$", "return isolated or True", line)
-                    pip.write(line)
+            # The following was deprecated after (probably) version 19
+            # pip_module = "%s/Versions/%s/lib/python%s/site-packages/pip/__init__.py" % \
+            #                          (pythonFrameworkPath, pythonHBVer, pythonHBVer)
+            # with open(pip_module, 'r') as pip:
+            #     buf = pip.readlines()
+            # with open(pip_module, 'w') as pip:
+            #     import re
+            #     for line in buf:
+            #         # this will reject user's configuration of pip, forcing the isolated mode
+            #         line = re.sub("return isolated$", "return isolated or True", line)
+            #         pip.write(line)
 
+            # The following will remove prefix= setting in distutils.cfg
+            # This will cause all packages to be installed to sys.prefix
+            # By default, it has prefix=/usr/local
             distutilsconfig = "%s/Versions/%s/lib/python%s/distutils/distutils.cfg" % \
                                                 (pythonFrameworkPath, pythonHBVer, pythonHBVer)
             with open(distutilsconfig, 'r') as file:
@@ -1207,7 +1213,6 @@ def Deploy_Binaries_For_Bundle(config, parameters):
             with open(distutilsconfig, 'w') as file:
                 import re
                 for line in buf:
-                    # This will cause all packages to be installed to sys.prefix
                     if re.match('prefix=', line) is not None:
                         continue
                     file.write(line)
@@ -1234,6 +1239,8 @@ def Deploy_Binaries_For_Bundle(config, parameters):
         print( " [8] Skipped deploying Qt's Frameworks and optional Python/Ruby Frameworks..." )
     print( "##### Finished deploying libraries and executables for <klayout.app> #####" )
     print("")
+    print("### klayout.app is located in %s/klayout.app !" % MacPkgDir)
+
     os.chdir(ProjectDir)
     return 0
 
@@ -1253,7 +1260,7 @@ def Main():
 
     if not config['DeploymentF'] and not config['DeploymentP']:
         ret = Run_Build_Command(parameters)
-        pp.pprint(config)
+        # pp.pprint(config)
         if not ret == 0:
             sys.exit(1)
     else:
